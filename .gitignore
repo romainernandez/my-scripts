@@ -1,0 +1,8 @@
+# Pycharm
+/.idea/
+
+# Logs
+*.log
+
+# Result
+result.*
