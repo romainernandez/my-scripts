@@ -4,5 +4,8 @@
 # Logs
 *.log
 
+# Sources
+source*
+
 # Result
 result.*
