@@ -2,136 +2,170 @@
 # -*- coding: utf-8 -*-
 
 import csv
-import logging
-
 import datetime
 import whois
 import time
 
-from logging.handlers import RotatingFileHandler
+from scripts.helpers import get_logger
 
-SOURCE_FILE = 'source.csv'
-RESULT_FILE = 'result.csv'
-LOG_FILE = 'activity.log'
+LOG_FILE = __file__ + '.log'
+logger = get_logger(LOG_FILE)
 
-logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
-
-formatter = logging.Formatter(
-    '%(asctime)s :: %(levelname)s :: %(filename)s :: %(funcName)s :: %(lineno)s :: %(message)s')
-
-file_handler = RotatingFileHandler(LOG_FILE, 'a', 1024 * 1024 * 1000 * 2, 1)  # 2 GB
-file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(formatter)
-logger.addHandler(file_handler)
+SOURCE_FILE = '../src/webmail-migration.csv'
+RESULT_FILE = '../res/res.csv'
 
 
-def get_partial_info_from_source():
+def get_partial_infos_from_source():
     '''
-    Partial info are the one we get from the csv source file.
+        Partial info are the one we get from the csv source file.
     '''
-    partial_info = list()
-    with open(SOURCE_FILE, newline='') as csvfile:
-        reader = csv.DictReader(csvfile)
+    partial_infos = list()
+    with open(SOURCE_FILE) as csvfile:
+        reader = csv.DictReader(csvfile, delimiter=';')
         for row in reader:
-            domain_name = row['Nom de domaine']
-            partial_info.append((domain_name,))
-    return partial_info
+            domain = row['domain']
+            active_accounts = row['active_accounts']
+            partial_infos.append( (domain, active_accounts) )
+    logger.debug(partial_infos)
+    return partial_infos
 
 
-def get_formated_data(data):
-    if not data: # domain is not available or no data available (happen)
+def get_formated_date(date):
+    if isinstance(date, list) and isinstance(date[0], datetime.datetime):  # some non afnic response
+        return date[0].strftime("%Y-%m-%d %H:%M:%S")
+    elif isinstance(date, datetime.datetime):
+        return date.strftime("%Y-%m-%d %H:%M:%S")
+    else:  # should not appen
         return ''
-    if isinstance(data, list) and isinstance(data[0], datetime.datetime):  # some non afnic response
-        return data[0].strftime("%Y-%m-%d %H:%M:%S")
-    elif isinstance(data, datetime.datetime):
-        return data.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def get_value_or_None(w, key):
+def get_value_or_empty(whois_info, key):
     try:
-        return w[key]
+        return whois_info[key] or '' # null will return ''
     except Exception as e:
-        logger.error(e)
-        return
+        logger.error(e)  # check with log if answer is null
+        return ''
 
 
-def get_parsed_whois_info(w):
-    name_servers, org, name, emails, address, whois_server, referral_url, state, registrar, expiration_date, \
-    creation_date, country, zipcode, city, status, updated_date = get_value_or_None(w, 'name_servers'), \
-    get_value_or_None(w, 'org'), get_value_or_None(w, 'name'), get_value_or_None(w, 'emails'), \
-    get_value_or_None(w, 'address'), get_value_or_None(w, 'whois_server'), get_value_or_None(w, 'referral_url'), \
-    get_value_or_None(w, 'state'), get_value_or_None(w, 'registrar'), get_formated_data(get_value_or_None(w, 'expiration_date')), \
-    get_formated_data(get_value_or_None(w, 'creation_date')), get_value_or_None(w, 'country'), get_value_or_None(w, 'zipcode'), \
-    get_value_or_None(w, 'city'), get_value_or_None(w, 'status'), get_formated_data(get_value_or_None(w, 'updated_date')),
-    return name_servers, org, name, emails, address, whois_server, referral_url, state, registrar, expiration_date, \
-           creation_date, country, zipcode, city, status, updated_date
+def get_parsed_common_whois_info(whois_info):
+    '''
+    Those are common info for all domain extension
+    '''
+    common_whois_info = (get_value_or_empty(whois_info, 'registrar'),
+                         get_formated_date(get_value_or_empty(whois_info, 'creation_date')),
+                         get_formated_date(get_value_or_empty(whois_info, 'expiration_date')),
+                         get_value_or_empty(whois_info, 'name_servers'),
+                         get_value_or_empty(whois_info, 'status'),
+                         get_value_or_empty(whois_info, 'emails'),
+                         get_formated_date(get_value_or_empty(whois_info, 'updated_date')),
+    )
+    return common_whois_info
 
 
-def get_info_from_whois(domain_name):
-    logger.debug(domain_name)
+def get_parsed_generic_whois_info(whois_info):
+    generic_whois_info = (get_value_or_empty(whois_info, 'whois_server'),
+                          get_value_or_empty(whois_info, 'referral_url'),
+                          get_value_or_empty(whois_info, 'dnssec'),
+                          get_value_or_empty(whois_info, 'name'),
+                          get_value_or_empty(whois_info, 'org'),
+                          get_value_or_empty(whois_info, 'address'),
+                          get_value_or_empty(whois_info, 'city'),
+                          get_value_or_empty(whois_info, 'state'),
+                          get_value_or_empty(whois_info, 'zipcode'),
+                          get_value_or_empty(whois_info, 'country'),
+                         )
+    return generic_whois_info
+
+
+def get_parsed_whois_info(domain_name, whois_info):
+    extension = get_extension(domain_name)
+    common_whois_info = get_parsed_common_whois_info(whois_info)
+    if extension=='fr':
+        generic_whois_info = ('', ) * 10
+    else:
+        generic_whois_info = get_parsed_generic_whois_info(whois_info)
+    parsed_whois_info = common_whois_info + generic_whois_info
+    return parsed_whois_info
+
+
+def get_whois_info(domain_name):
     try:
         whois_info = whois.whois(domain_name)
     except Exception as e:
         logger.error('failed whois for : '+ domain_name)
-        return ('', ) * 16
-    time.sleep(20) # don't get kicked TODO: find optimal sleep value
-    return get_parsed_whois_info(whois_info)
+        return ('', ) * 17
+    else:
+        logger.debug(whois_info)
+        time.sleep(20) # don't get kicked
+        return get_parsed_whois_info(domain_name, whois_info)
 
 
-def create_result_csv_with_all_info(all_info):
-    with open(RESULT_FILE, 'w', newline='') as file:
-        fieldnames = ['Nom de domaine', 'name_servers', 'org', 'name', 'emails', 'address', 'whois_server',
-                      'referral_url', 'state', 'registrar', 'expiration_date', 'creation_date', 'country', 'zipcode',
-                      'city', 'status', 'updated_date']
+def get_extensions():
+    '''
+        Partial info are the one we get from the csv source file.
+    '''
+    extensions = set()
+    with open(SOURCE_FILE) as csvfile:
+        reader = csv.DictReader(csvfile, delimiter=';')
+        for row in reader:
+            domain = row['domain']
+            extension = get_extension(domain)
+            extensions.add(extension)
+    logger.debug(extensions)
+    return extensions
+
+
+def get_extension(domain_name):
+    try:
+        _, extension = domain_name.rsplit('.', 1)
+    except Exception as e:
+        logger.error('Could not split ' + domain_name + ', error is ' + e)
+    else:
+        return extension
+
+def append_info_csv(all_info):
+    with open(RESULT_FILE, 'a', newline='') as file:
+        fieldnames = ['domain', 'active_accounts', 'registrar', 'creation_date', 'expiration_date', 'name_servers',
+                      'status', 'emails', 'updated_date', 'whois_server', 'referral_url', 'dnssec', 'name', 'org',
+                      'address', 'city', 'state', 'zipcode', 'country']
         writer = csv.DictWriter(file, fieldnames=fieldnames)
 
-        writer.writeheader()
-
-        for info in all_info:
-            logger.debug(info)
-            domain_name, name_servers, org, name, emails, address, whois_server, referral_url, state, registrar, expiration_date, \
-        creation_date, country, zipcode, city, status, updated_date = info
-            writer.writerow({
-                'Nom de domaine': domain_name,
-                'name_servers': name_servers,
-                'org': org,
-                'name': name,
-                'emails': emails,
-                'address': address,
-                'whois_server': whois_server,
-                'referral_url': referral_url,
-                'state': state,
-                'registrar': registrar,
-                'expiration_date': expiration_date,
-                'creation_date': creation_date,
-                'country': country,
-                'zipcode': zipcode,
-                'city': city,
-                'status': status,
-                'updated_date': updated_date
-            })
-            logger.debug(domain_name + ' OK')
-
-
-def get_all_info(partial_info):
-    all_info = list()
-    for info in partial_info:
-        domain_name, = info
-        domain_info = get_info_from_whois(domain_name)
-        logger.debug(domain_name)
-        logger.debug(domain_info)
-        all_info.append( (domain_name, ) + domain_info )
-    return all_info
+        domain, active_accounts, registrar, creation_date, expiration_date, name_servers, status, emails, updated_date, \
+        whois_server, referral_url, dnssec, name, org, address, city, state, zipcode, country = all_info
+        writer.writerow({
+            'domain': domain,
+            'active_accounts': active_accounts,
+            'registrar': registrar,
+            'creation_date': creation_date,
+            'expiration_date': expiration_date,
+            'name_servers': name_servers,
+            'status': status,
+            'emails': emails,
+            'updated_date': updated_date,
+            'whois_server': whois_server,
+            'referral_url': referral_url,
+            'dnssec': dnssec,
+            'name': name,
+            'org': org,
+            'address': address,
+            'city': city,
+            'state': state,
+            'zipcode': zipcode,
+            'country': country
+        })
+        logger.debug(domain + ' OK')
 
 
 def main():
     open(LOG_FILE, 'w').close() # empty log file at start
-    partial_info = get_partial_info_from_source()
-    logger.debug(partial_info)
-    all_info = get_all_info(partial_info)
-    logger.debug(all_info)
-    create_result_csv_with_all_info(all_info)
+    # extensions = get_extensions()
+
+    partial_infos = get_partial_infos_from_source()
+    for partial_info in partial_infos:
+        domain, active_accounts = partial_info
+        whois_info = get_whois_info(domain)
+        all_info = partial_info + whois_info
+        append_info_csv(all_info)
 
 
 if __name__ == '__main__':
